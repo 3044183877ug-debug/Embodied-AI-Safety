@@ -1,0 +1,25 @@
+@charset "UTF-8";
+*{box-sizing:border-box}
+body{font:17px/1.65 "Microsoft YaHei","Segoe UI",sans-serif;background:#eef3f7;color:#20364b;max-width:1400px;margin:auto;padding:24px}
+section{padding:24px;background:white;border-radius:12px;margin:24px 0}
+h1{font-size:30px;line-height:1.4;margin:12px 0 18px}h2{font-size:24px;line-height:1.45;margin:0 0 15px}h3{font-size:18px;line-height:1.5;margin:24px 0 8px}
+p{margin:12px 0}a{color:#086c9a;text-underline-offset:3px}a:hover{text-decoration-thickness:2px}
+video,img{display:block;width:100%;height:auto}video{max-height:76vh;background:#111;margin:12px 0 25px}img{margin:18px 0}
+.muted,.small,.micro{color:#627487;font-size:15px}.note,.warning{padding:12px 16px;background:#f3f6f9;border-left:3px solid #a7bbc9;border-radius:3px}
+.table-wrap{overflow-x:auto}table{width:100%;border-collapse:collapse;font-size:16px;margin:15px 0}th,td{text-align:left;vertical-align:top;padding:12px 14px;border:1px solid #dce5ed}th{background:#f1f5f8;font-weight:600}th:first-child{width:28%}
+ol,ul{padding-left:27px}li{margin:12px 0}strong{font-weight:650}
+details{margin:14px 0;background:#f8fafc;border:1px solid #dfe7ee;border-radius:7px}
+summary{padding:12px 16px;color:#086c9a;font-size:17px;cursor:pointer;line-height:1.5}summary:hover{background:#eef4f8;border-radius:7px}
+summary:focus-visible,a:focus-visible{outline:2px solid #086c9a;outline-offset:3px}
+details[open]>summary{border-bottom:1px solid #dfe7ee}
+.detail-body{padding:5px 20px 18px;font-size:16px;line-height:1.8}.detail-body h3{font-size:18px;margin-top:21px}.detail-body h3:first-child{margin-top:14px}.detail-body table{font-size:15px}.detail-body .source-note{font-size:14px;color:#627487;padding-top:13px;margin-top:20px;border-top:1px solid #dfe7ee;overflow-wrap:anywhere}
+.equation{background:#edf2f6;border-radius:6px;padding:12px 18px;margin:15px 0;font-family:"Cambria Math","Times New Roman",serif;font-size:24px;line-height:1.7;overflow-x:auto;color:#20364b}
+.equation.compact{font-size:23px}.mathline{white-space:nowrap}.equation sub,.equation sup{font-size:.68em;line-height:0}.eq-note{font:15px/1.7 "Microsoft YaHei",sans-serif;color:#627487;margin-top:9px}.frac{display:inline-flex;flex-direction:column;text-align:center;vertical-align:middle;line-height:1.2;margin:0 .15em}.num{border-bottom:1px solid currentColor;padding:0 .14em .08em}.den{padding:.08em .14em 0}.matrix{display:inline-grid;grid-auto-flow:row;vertical-align:middle;line-height:1.4;border-left:1.5px solid;border-right:1.5px solid;border-radius:5px;padding:4px 10px;margin:0 5px;text-align:center}
+.mechanism{max-width:620px;margin:24px auto}.mechanism svg{width:100%;height:auto}.mechanism text{font-family:"Microsoft YaHei",sans-serif}
+@media(max-width:700px){body{padding:12px;font-size:16px}section{padding:18px;margin:18px 0}h1{font-size:26px}h2{font-size:22px}th,td{padding:9px 10px}table{min-width:550px}.detail-body table{min-width:500px}.detail-body{padding:5px 13px 15px}.equation{font-size:21px}.equation.compact{font-size:20px}summary{font-size:16px}}
+@media print{body{max-width:none;padding:0;background:white}section{border:1px solid #ddd;break-inside:auto}video{display:none}details:not([open]){display:none}a{color:inherit}h2,h3{break-after:avoid}}
+
+/* Three-version overview; math and evidence keep native closed details. */
+.version-table{table-layout:fixed}.version-table th:first-child{width:16%}.version-table th:not(:first-child){width:28%}
+.detail-body{min-width:0}.detail-body>table{display:block;overflow-x:auto}code{overflow-wrap:anywhere;font-size:.9em}
+@media(max-width:700px){.version-table{min-width:780px}.detail-body>table{min-width:0;max-width:100%}}
