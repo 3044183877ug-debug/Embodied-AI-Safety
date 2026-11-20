@@ -1,300 +1,255 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>r177、r180、r198：三种推车尝试</title>
-<meta name="description" content="r177 路径跟踪、r180 载荷物理预测、r198 MPAC 适配：原理、实际结果与不足。公式默认折叠。">
-<link rel="stylesheet" href="8fd09cc5dc_styles.css">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="在 r177 整车基础上接入 Keep 受力模型，展示控制改动、全程结果、终点货物滑移与原速视频。">
+  <title>meeting2｜r177 与 Keep 整车运输对比</title>
+  <link rel="stylesheet" href="meeting2_styles.css">
 </head>
-<body><section id="papers" style="max-width:1200px;margin:24px auto;padding:20px;background:#fff;border:1px solid #ddd"><h2>论文原文</h2><p><a href="MPAC_2506.18410v2.pdf">MPAC 原文 PDF</a> · <a href="https://arxiv.org/abs/2506.18410v2">作者与版本来源</a></p><p><a href="Keep_2305.17484v2.pdf">Keep It Upright 原文 PDF</a> · <a href="https://arxiv.org/abs/2305.17484v2">作者与版本来源</a></p><p>以下为 r177、r180、r198 三版本展示。工程适配不等于论文完整复现，完成运输不等于安全通过。</p></section>
-<h1>r177、r180、r198：三种推车尝试</h1>
-<p><strong>r177：先把车推到终点。r180：再试着预判颠簸。r198：让底盘、板车和双臂一起规划并跑完全程。</strong></p>
-<p>这三个版本都有本场景的全程记录，但解决的重点不同。r198 是后来跑通的 MPAC 启发适配版；它把整组运动规划接通了，货物滑移仍没有优于 r177。</p>
-<p class="muted">正文讲意思，公式、参数与源码放在折叠区，需要时再展开。这里只讲这三个归档版本。<a href="#r177">看 r177</a> · <a href="#r180">看 r180</a> · <a href="#r198">看 r198</a> · <a href="#results">看结果和视频</a> · <a href="#problems">看具体不足</a></p>
+<body>
+<header id="top">
+  <p class="eyebrow">MEETING 02 · 具身智能安全 · 2026.11.20</p>
+  <h1>在 r177 基础上，让货物受力参与整车决策</h1>
+  <p class="lead">用机器人自身传感器和已知货物参数，预测不同速度、转向会带来什么后果，再决定怎样把货物运到终点。</p>
+  <p>本次已完成整车运输。与原 r177 相比，全程货物位移峰值减小，运输时间增加；终点转弯仍出现车板跨出台阶边界，需要继续修正。</p>
+  <p class="muted">同场景、同装载的两次完整仿真：原 r177（11 月 18 日）与本次 r177 + Keep（11 月 19 日）。</p>
+  <p class="document-links"><a href="documents/keep_model_expert_review.pdf">详细公式文档 PDF</a> · <a href="documents/keep_model_expert_review.html">在线阅读公式文档</a></p><nav aria-label="页面目录"><a href="#objective">目标与输入</a><a href="#difference">两版区别</a><a href="#model">Keep 思想与公式</a><a href="#terminal-change">终点逻辑</a><a href="#videos">完整视频</a></nav></header>
+<main>
+<section id="objective">
+  <h2>1. 目标、输入与输出</h2>
+  <p>目标是<strong>到达终点，并让货物尽可能保持稳定</strong>。到达、掉货、车板边界、货物位移和耗时需要一起看。滑移量用来衡量运输过程中的扰动。</p>
+  <div class="flow" aria-label="整车闭环信息流">
+    <div><span class="step-num">01 · 观察</span><b>机器人现在在哪里</b><p>自身位姿、轮速、关节编码器，以及 ZED 深度形成的已观测地形。</p></div>
+    <div><span class="step-num">02 · 预测</span><b>这样走会怎样</b><p>预测候选运动下的车板姿态、加速度、角速度和角加速度，再计算货物所需接触力。</p></div>
+    <div><span class="step-num">03 · 选择</span><b>速度和转向一起算</b><p>在跟随路线、平顺运动和货物受力之间优化，输出接下来一小段运动。</p></div>
+    <div><span class="step-num">04 · 执行</span><b>整车继续向前</b><p>连续运动转换为左右轮目标；双臂和升降继续使用 r177 的地形跟随，再根据新观测重算。</p></div>
+  </div>
+  <details id="inputs"><summary>展开：在线输入、货物参数与评价数据</summary><div class="detail-body">
+    <div class="table-wrap"><table><thead><tr><th>信息</th><th>如何使用</th></tr></thead><tbody>
+      <tr><td>深度图与地形记忆</td><td>形成已观测区域的高度、支撑与通行信息；每次优化使用当前观测构成的地形快照。</td></tr>
+      <tr><td>自身位姿、轮速、关节状态</td><td>给出当前底盘运动状态；通过关节正运动学与抓持几何估计推车位置和姿态。</td></tr>
+      <tr><td>已知货物参数</td><td>12 个刚体箱体，三层、每层 4 个，总质量 10 kg；静摩擦系数 0.82、动摩擦系数 0.76；质量、尺寸、重心、惯量和初始接触关系进入模型。</td></tr>
+      <tr><td>仿真货物真实状态</td><td>用于本页位移、倾角和掉货评价。当前控制器没有使用相机在线追踪每个箱子的滑移。</td></tr>
+    </tbody></table></div>
+    <p>本次保持两版相同的货物、场景与物理设置。后续视频学习应帮助识别缺失的动态现象、修正模型参数和选取验证场景。</p>
+  </div></details>
+</section>
 
 <section id="difference">
-<h2>三个版本，各自解决什么</h2>
-<div class="table-wrap"><table class="version-table"><thead><tr><th>关心的问题</th><th>r177 · 路径跟踪</th><th>r180 · 载荷物理预测</th><th>r198 · MPAC 启发适配</th></tr></thead><tbody>
-<tr><td>怎么决定动作</td><td>在线找路，急弯降低参考速度，按偏差纠正</td><td>试算 25 组速度和转向，比较未来 1.5 秒的运动与受力</td><td>沿在线搜索出的整组路径，同时优化未来 5 秒的底盘、双臂与升降动作</td></tr>
-<tr><td>管不管推车</td><td>管。底盘推，双臂和升降随地形调整</td><td>沿用推车接口，换成物理预测选动作</td><td>管。底盘带动整组转弯，预测板车运动，同时保持双手与把手的关系</td></tr>
-<tr><td>货物如何参与</td><td>记录载荷，但没有用质量和重心选速度、转向</td><td>总质量、重心、惯量参与受力计算；预测时箱子不相对滑动</td><td>仿真中有自由堆叠货物，但没有把载荷受力和颠簸代价加入这版优化</td></tr>
-<tr><td>路线从哪里来</td><td>根据相机观测地图在线找路</td><td>沿用这部分，不读取 r177 的历史路线或速度</td><td>复用 r177 的搜索方法，在本轮观测地图上重新找路；不是回放 r177 路线</td></tr>
-<tr><td>实际结果</td><td>完成全程，仍有滑移</td><td>完成全程，但更慢、滑移更大</td><td>完成全程，仍有调整动作，滑移也较大</td></tr>
-<tr><td>能否预测哪箱散落</td><td>不能</td><td>不能；只预测整体运动与部分受力量</td><td>不能；重点是运动配合与几何避障</td></tr>
-</tbody></table></div>
-<p><strong>三版都实际在推有货的板车。</strong>区别在于有没有根据货物受力改变动作，以及有没有把底盘、双臂和升降放在同一段规划里。r198 不是把 r180 的所有物理功能继续叠加上去。</p>
-<p class="muted">版本更正：此前展示的 r189 是未完成的局部试验；这里已换成你记得的全程版本 r198。r189 原始记录仍保留在历史报告中。</p>
+  <h2>2. 基线是谁，本次改了什么</h2>
+  <p>基线是<strong>原 r177 控制器</strong>的完整运行。本次沿用它的地图、路径搜索、双臂和升降跟随，将局部速度与转向的选择接入 Keep 受力模型。</p>
+  <div class="table-wrap"><table class="compare"><thead><tr><th>环节</th><th class="baseline">原 r177</th><th class="current">本次 r177 + Keep</th></tr></thead><tbody>
+    <tr><td>路线从哪里来</td><td>根据已观测地形搜索可走路线，随观测更新。</td><td>保留同一套地图与全局路径搜索。</td></tr>
+    <tr><td>怎样决定局部运动</td><td>由路径曲率、位置误差和朝向误差生成速度、角速度，再做反馈与限幅。</td><td>以路线为参考，联合优化未来的平移 jerk、转向 jerk 和货物接触力。</td></tr>
+    <tr><td>货物如何参与</td><td>货物参与物理仿真；质量、摩擦与接触受力没有进入速度决策。</td><td>候选运动改变车板惯性载荷，货物受力残差直接进入优化目标，影响动作选择。</td></tr>
+    <tr><td>双臂与升降</td><td>跟随估计地形和抓持目标，通过运动学求解执行。</td><td>保留 r177 的执行方式；局部运动改变后，实际跟随过程随之变化。</td></tr>
+    <tr><td>终点附近</td><td>原导航反馈可以随当前位置切换前进、倒退和转向。</td><td>用原导航当前反馈构造一致的预测参考；允许速度连续过零，避免额外换向锁把转向一起停住。</td></tr>
+    <tr><td>共同约束</td><td colspan="2">最大速度 0.08 m/s、角速度 0.09 rad/s；原物理场景、货物与轮侧限制保持一致。</td></tr>
+  </tbody></table></div>
+  <details id="r177-method"><summary>展开：r177 原有的速度、转向与车轮公式</summary><div class="detail-body">
+    <p>路径搜索给出局部曲率和行驶方向。速度同时受剩余路程、制动能力和曲率限制，转向再叠加朝向与横向误差反馈。</p>
+    <div class="equation" aria-label="r177 参考速度和转向公式">
+      <span class="mathline">v<sub>ref</sub> = σ min(0.08, √[2 × 0.04 × max(L − 0.04, 0)], 0.065 / |κ|)</span>
+      <span class="mathline">ω<sub>ref</sub> = clip(v<sub>ref</sub> κ + 0.8 e<sub>ψ</sub> + 0.8 σ e<sub>y</sub>, ±0.09)</span>
+      <span class="mathline">v<sub>des</sub> = clip(v<sub>ref</sub> + 0.5(v<sub>ref</sub> − v<sub>meas</sub>), ±0.08)</span>
+      <span class="mathline">Ω<sub>L</sub> = (v − 0.24 ω) / 0.0862,　Ω<sub>R</sub> = (v + 0.24 ω) / 0.0862</span>
+    </div>
+    <p class="equation-caption">σ 是前进或倒退方向，L 是剩余路径长度，κ 是曲率，e<sub>ψ</sub>、e<sub>y</sub> 分别是朝向和横向误差。直线段 κ = 0 时，曲率项不限制速度。轮距 0.48 m，轮半径 0.0862 m。</p>
+    <p>路径搜索使用 0.16 m 的前进/倒退运动段和多个曲率候选。控制名义周期 0.2 秒，路径名义重规划周期 2 秒；新观测和执行反馈持续更新局部决策。</p>
+    </div></details>
 </section>
 
-<section id="inputs">
-<h2>它们拿到什么，又发出什么</h2>
-<p><strong>提前知道：</strong>目的地、机器人与板车尺寸、把手位置、机械结构。r180 另外使用装载时的质量、重心、惯量和名义接触参数。</p>
-<p><strong>边走边获得：</strong>相机当前看见的地形深度、自身位置和速度、各关节的位置。通过这些信息估计板车与机器人现在的相对关系。</p>
-<p><strong>发出动作：</strong>r177、r180 先决定前后速度和转向，再由执行层配合双臂与升降。r198 则在同一段预测里，联合求出底盘速度、双臂关节目标和升降目标。</p>
-<details><summary>展开相机坐标变换、地形平面和板车姿态估计</summary><div class="detail-body"><h3>相机坐标转到统一坐标</h3><div class="equation"><div class="mathline">p<sub>W</sub> = R<sub>WC</sub>p<sub>C</sub> + t<sub>WC</sub></div><div class="eq-note">R、t 是相机的位置与朝向变换，p_C 是相机坐标下的点。</div></div><h3>坐标变换</h3><p>像素取中心位置 u=x+0.5、v=y+0.5；f<sub>x</sub>、f<sub>y</sub> 是焦距像素值，c<sub>x</sub>、c<sub>y</sub> 是主点。点云经相机到世界的刚体变换后用于栅格更新和局部地形拟合。</p><div class="equation"><div class="mathline">p<sub>C</sub> = <span class="matrix"><span>(u − c<sub>x</sub>)D/f<sub>x</sub></span><span>(v − c<sub>y</sub>)D/f<sub>y</sub></span><span>D</span></span></div><div class="mathline">z = ax + by + c ,　n = <span class="frac"><span class="num">[-a, −b, 1]<sup>T</sup></span><span class="den">√(a²+b²+1)</span></span></div></div>
-<h3>r177 / r180 的板车状态如何获得</h3><div class="equation"><div class="mathline">R̂<sub>C</sub> = R<sub>hand</sub>R<sub>grasp</sub><sup>T</sup></div><div class="mathline">p̂<sub>C</sub> = p<sub>hand</sub> − R̂<sub>C</sub>r<sub>grasp</sub></div><div class="eq-note">由关节编码器正运动学与固定夹持标定恢复板车姿态，再融合两只手的估计。</div></div>
-<p>以上是 r177 / r180 的估计近似，依赖把手与夹爪相对关系保持固定。r198 的规划另按“夹持点与圆管轴线”约束，见下方专节。发生相对转动或柔性变形时，估计可能偏移；它不是独立测量到的板车真值。自身里程计/IMU接口也未覆盖完整实机噪声。</p>
-<h3>相机为何会转</h3><p>两组运行都保留了头部扫描，相机固定在头部，随头部运动。头部扫描代码、相机配置和运行模块的对应哈希一致。不能把“相机本体固定”说成“整个视角固定”，也不能仅凭这两次运行推断扫描是滑移增大的主因。</p><div class="source-note"><b>对应归档依据：</b><br>点云与地图实现<br>观测地形输入<br>两版本相机与扫描核对</div></div></details>
+<section id="model">
+  <h2>3. Keep 如何真正影响动作</h2>
+  <p>机器人准备加速、刹车或转弯时，Keep 先算：<strong>要让箱子跟着车板一起走，各接触点需要提供多大的力？</strong>再把受力情况与走向终点的要求放在一起，决定速度、转向和加减速的快慢。</p>
+  <p>下面五点按“需要什么力、接触面能提供什么力、留多少余量、怎样选动作、怎样平顺执行”的顺序解释。</p>
+  <p class="callout">当前模型用“维持货物相对车板不动所需的受力”来影响动作。箱子实际移动了多少毫米，由仿真记录统计；货物滑动后的距离预测还需要补充模型。</p>
+  <details id="force-equations"><summary>展开：Keep 的五个思想——推车例子、公式和当前实现</summary><div class="detail-body">
+    <p>贯穿下面五点的例子：一辆装着三层箱子的推车，准备边减速边转弯。我们要让它继续向终点走，同时少给货物带来突然的拉扯和晃动。</p>
+
+    <article class="idea-block" id="keep-idea-1">
+      <h3>① 先算清楚：这个动作需要多大的支撑力和摩擦力</h3>
+      <p>推车加速时，箱子要靠接触面的力才能跟着加速；推车转弯时，箱子也需要侧向的力。箱子更重、重心更高、放的位置不同，所需的力和力矩也会不同。</p>
+      <p><strong>Keep 先假设箱子保持原来的摆放和接触关系，计算“要维持这种状态，需要什么力”。</strong>这把机器人准备采取的动作，与已知的货物质量、重心和惯量联系起来。</p>
+      <div class="equation" aria-label="Keep 论文式一二四：箱体加速度与受力平衡">
+        <span class="mathline">a<sub>i</sub> = a<sub>D</sub> + α<sub>D</sub> × r<sub>i</sub> + ω<sub>D</sub> × (ω<sub>D</sub> × r<sub>i</sub>)</span>
+        <span class="mathline">Σ<sub>j</sub> f<sub>ij</sub> = m<sub>i</sub>(a<sub>i</sub> − g)</span>
+        <span class="mathline">Σ<sub>j</sub> ℓ<sub>ij</sub> × f<sub>ij</sub> = I<sub>i</sub> α<sub>D</sub> + ω<sub>D</sub> × (I<sub>i</sub> ω<sub>D</sub>)</span>
+      </div>
+      <p>第一行把车板的平移、转向加速和持续转弯，换算成箱体重心的加速度。第二、三行要求接触力提供相应的合力与力矩。<strong>候选动作一变，所需受力就会变。</strong></p>
+      <p class="equation-caption">对应论文式 (1)、(2)、(4)。D 是车板；m 是箱体质量；I 是惯量；r 是车板原点到箱体重心的向量；ℓ 是箱体重心到接触点的力臂。以上向量在同一世界坐标系中表达。</p>
+      <p><strong>当前实现：</strong>用预测的车板姿态、加速度、角速度和角加速度，计算 12 个箱体分别需要的合力与力矩。</p>
+    </article>
+
+    <article class="idea-block" id="keep-idea-2">
+      <h3>② 接触面能提供的力有上限，模型必须遵守这个上限</h3>
+      <p>箱子放在车板上，车板可以托住它；要让箱子横向跟着车走，还需要摩擦。摩擦能力有限，不能因为希望车转得快，就在计算里随意增加摩擦力。</p>
+      <div class="equation" aria-label="Keep 论文式三五：摩擦约束与作用反作用">
+        <span class="mathline">f<sub>j</sub><sup>n</sup> ≥ 0,　|f<sub>j,x</sub><sup>t</sup>| + |f<sub>j,y</sub><sup>t</sup>| ≤ μ<sub>j</sub> f<sub>j</sub><sup>n</sup></span>
+        <span class="mathline">f<sub>j</sub><sup>a</sup> = −f<sub>j</sub><sup>b</sup></span>
+      </div>
+      <p>第一行的意思是：接触面只能推着物体，切向摩擦力受到法向压力和摩擦系数 μ 的限制。第二行的意思是：上层箱子压下层箱子多大力，下层就对上层产生大小相等、方向相反的力。</p>
+      <p class="equation-caption">对应论文式 (3)、(5)。fⁿ 是垂直接触面的力，fᵗ 是沿接触面的力；这里采用论文中的 L1 摩擦锥近似。</p>
+      <p><strong>当前实现：</strong>车板与底层箱子、上下层箱子之间的接触都进入计算。接触力由优化器求出，用于选择动作。</p>
+    </article>
+
+    <article class="idea-block" id="keep-idea-3">
+      <h3>③ 规划时少依赖摩擦，给实际运输留一点余量</h3>
+      <p>如果每次转弯都把估计的摩擦能力用到极限，一点额外振动、材料误差就可能让箱子滑动。Keep 因此先算：<strong>这组箱子静止放着时，至少需要多大摩擦才能稳住？</strong>再用这个较小的值来构造运动中的受力代价。</p>
+      <div class="equation" aria-label="Keep 论文式六：最小静态可行摩擦">
+        <span class="mathline">min<sub>R, f, {μ<sub>j</sub>}</sub>　½ Σ<sub>j</sub> w<sub>j</sub> μ<sub>j</sub>²</span>
+        <span class="mathline">满足：静止时的受力平衡、接触摩擦约束，且 μ<sub>j</sub> ≥ 0</span>
+      </div>
+      <p>论文式 (6) 会同时选择托盘姿态 R、接触力 f 和最小摩擦系数 μ。对于平行接触面，如果能把托盘摆水平，静止支撑可能只需要向上的力，此时最小摩擦系数可以是 0。</p>
+      <p><strong>当前实现：</strong>推车的姿态受到轮子和地形限制。我们根据每个候选车板姿态，计算当前规则堆叠至少需要的静态摩擦：</p>
+      <div class="equation" aria-label="当前推车模型的静态摩擦计算">
+        <span class="mathline">μ<sub>j</sub><sup>*</sup> = (|g<sub>j,x</sub>| + |g<sub>j,y</sub>|) / g<sub>j,z</sub></span>
+        <span class="mathline">μ<sub>j</sub><sup>*</sup> ≤ μ<sub>j,material</sub></span>
+      </div>
+      <p>分子是静态支撑所需的切向分量，分母是法向分量；同时还检查上方货物合重心的重力作用线是否落在支撑面内。这个计算用于当前“接触面平行、每个箱子由一个下方物体支撑”的结构。</p>
+      <p><strong>实际材料的静摩擦系数仍为 0.82。</strong>较小的 μ<sup>*</sup> 用在规划模型里，让优化器优先少依赖摩擦；运动时确实需要额外摩擦的部分，通过下一点的受力残差代价体现。</p>
+      <p class="equation-caption">g<sub>j</sub> 是抵消重力所需的向上支撑方向，在该接触面坐标系中的分量。本项目沿用最小静态摩擦思想，计算方式适配了推车可达的姿态。</p>
+    </article>
+
+    <article class="idea-block" id="keep-idea-4">
+      <h3>④ 边算货物受力，边决定车怎么走</h3>
+      <p>箱子有多个，重心和位置各不相同。使用较小的规划摩擦系数后，要让所有箱子的受力在运动中都严格满足平衡，可能很难做到。Keep 把这种“差多少才能平衡”变成优化中的一项代价。</p>
+      <div class="equation" aria-label="受力残差与联合优化目标">
+        <span class="mathline">r<sub>balance</sub> = A f − b(z, u)</span>
+        <span class="mathline">min<sub>u, f</sub>　J<sub>track</sub> + J<sub>motion</sub> + J<sub>cargo</sub></span>
+        <span class="mathline">J<sub>cargo</sub> = Σ<sub>k</sub> w<sub>k</sub> [ ‖S<sup>−1</sup>(A f<sub>k</sub> − b<sub>k</sub>(z, u))‖² / N<sub>body</sub> + 10<sup>−6</sup> ‖z<sub>f,k</sub>‖² ]</span>
+      </div>
+      <p>A f 是接触力提供的合力与力矩，b 是候选动作需要的合力与力矩；两者之差就是受力残差。<strong>在其他条件相近时，残差越大，这个动作在优化中越吃亏。</strong></p>
+      <p>例如，比较两种都能通过拐角的走法：一种加速或转向变化较急，预测受力残差较大；另一种平缓一些，残差较小但前进稍慢。优化器综合路线跟踪、平顺性和货物受力代价，调整速度与转向。</p>
+      <p><strong>当前实现：</strong>动作和接触力放进同一个优化问题求解。动作改变会改变所需受力，货物代价再反过来影响所选动作。具体权重决定了跟随路线与稳住货物之间怎样取舍。</p>
+      <p class="equation-caption">对应论文第五节的软化处理和式 (9) 的联合 MPC。上面 J<sub>cargo</sub> 是本项目的实现形式：S 统一力与力矩的尺度，w<sub>k</sub> 是时间积分权重，N<sub>body</sub> 是箱体数，z<sub>f,k</sub> 是求解器中的力变量。归一化采用 0.04 m/s²、0.08 rad/s² 的动作量级；权重属于本项目适配参数。</p>
+    </article>
+
+    <article class="idea-block" id="keep-idea-5">
+      <h3>⑤ 加减速逐渐变化，少给货物突然的冲击</h3>
+      <p>从匀速行驶开始刹车时，可以让减速力度逐渐增加，再逐渐调整。Keep 把加速度也作为需要连续衔接的状态，以 jerk——<strong>加速度变化得有多快</strong>——作为输入。</p>
+      <div class="equation" aria-label="Keep 的 jerk 输入及当前推车状态">
+        <span class="mathline">z = [x, y, ψ, v, ω, a, α]<sup>T</sup>,　u = [j<sub>v</sub>, j<sub>ω</sub>]<sup>T</sup></span>
+        <span class="mathline">v̇ = a,　ȧ = j<sub>v</sub>；　ω̇ = α,　α̇ = j<sub>ω</sub></span>
+      </div>
+      <p>速度 v 决定前进或倒退多快；加速度 a 决定速度变化多快；jerk 决定加速度变化多快。转弯也有对应的角速度 ω、角加速度 α 和转向 jerk。</p>
+      <p><strong>当前实现：</strong>主要优化底盘的平移 jerk 和转向 jerk，沿连续曲线发出车轮命令。论文第三节把底盘和手臂的运动一起建模优化；我们的双臂和升降目前仍使用 r177 的跟随控制。</p>
+    </article>
+
+    <p class="callout">五点连起来就是：<strong>算这个动作需要什么力 → 检查接触面能提供什么力 → 尽量少依赖摩擦 → 把受力代价放进动作选择 → 平顺地执行。</strong></p>
+    <p>牛顿—欧拉方程属于基础力学；固定相对摆放、点接触与 L1 摩擦锥包含建模假设和近似。最小摩擦、软平衡代价及其权重属于控制设计。详细推导条件与当前实现对照见专家审阅文档。</p>
+    <p class="muted">原文：<a href="Keep_2305.17484v2.pdf">Keep It Upright 论文，第 2–4 页</a>。代码：受力与接触约束、最小摩擦与软代价、联合运动优化。</p>
+  </div></details>
+  <details id="motion-equations"><summary>展开：运动状态、jerk、预测时域与约束</summary><div class="detail-body">
+    <div class="equation" aria-label="七维运动状态和双 jerk 输入">
+      <span class="mathline">z = [x, y, ψ, v, ω, a, α]<sup>T</sup>,　u = [j<sub>v</sub>, j<sub>ω</sub>]<sup>T</sup></span>
+      <span class="mathline">ẋ = v cos ψ,　ẏ = v sin ψ,　ψ̇ = ω</span>
+      <span class="mathline">v̇ = a,　ω̇ = α,　ȧ = j<sub>v</sub>,　α̇ = j<sub>ω</sub></span>
+    </div>
+    <div class="table-wrap"><table><thead><tr><th>参数</th><th>当前设置</th><th>作用</th></tr></thead><tbody>
+      <tr><td>预测时域</td><td>15 段 × 0.2 s = 3 s</td><td>比较短期运动后果，每次根据当前观测重新求解。</td></tr>
+      <tr><td>速度 / 角速度</td><td>0.08 m/s / 0.09 rad/s</td><td>保持 r177 的上限。</td></tr>
+      <tr><td>加速度 / 角加速度</td><td>0.04 m/s² / 0.08 rad/s²</td><td>限制加减速与转向变化。</td></tr>
+      <tr><td>平移 jerk / 转向 jerk</td><td>0.2 m/s³ / 0.4 rad/s³</td><td>让加速度连续衔接。</td></tr>
+      <tr><td>轮侧角加速度</td><td>2 rad/s²</td><td>匹配实际轮侧执行限制。</td></tr>
+      <tr><td>预测末端</td><td>v、ω、a、α 均为 0</td><td>预测时域末端保留停车能力；滚动执行时会继续更新计划。</td></tr>
+      <tr><td>执行采样</td><td>120 Hz</td><td>沿同一条连续曲线下发左右轮目标。</td></tr>
+    </tbody></table></div>
+    <p>0.2 秒是仿真控制步长。当前优化的计算墙钟时间尚未达到对应的实时预算。</p>
+    </div></details>
+  <details id="prediction"><summary>展开：为什么先预测车板，以及模型下一步要补什么</summary><div class="detail-body">
+    <p>车板是机器人动作传给货物的中间环节。当前预测器以机器人自身状态和推车运动学估计为起点，查询候选位置周围的已观测支撑地形，计算车板姿态、线加速度、角速度与角加速度，再交给货物受力模型。</p>
+    <p>短时预测保持当前相对抓持几何，尚未建立完整的双臂柔顺、抓持弹性和推车快速振动模型。货物已经明显滑动时，原始接触位置也会变化。这两部分都可能造成模型与实际运动的偏差，后续要用同步记录和视频定位。</p>
+    <p>本版完成的是 Keep 受力机制的整车适配；后续仍需核对完整论文方法、动态预测误差和多场景结果。</p>
+    </div></details>
 </section>
 
-<section id="r177">
-<h2>r177 是怎么把车推过去的</h2>
-<p><strong>先找能走的路。</strong>把已经看到的地面拼成局部地图，尝试不同的前进、后退和转弯动作，检查车体是否碰到障碍、轮下是否有支撑。</p>
-<p><strong>再沿着路走。</strong>看前面弯得急不急、还剩多远、自己偏了多少。急弯会主动降低参考速度，同时修正方向。</p>
-<p><strong>最后让机构配合。</strong>底盘按左右轮速度差转向；双臂与升降根据局部地形调整把手位置，使机器人继续推住板车。</p>
-<p>它已经具备“看到新地形后重新规划”的结构。不过，换成重载、偏载时，它不会因为计算到不同的载荷受力而自动选择另一种推法。</p>
-<details><summary>展开路径搜索、转弯减速和速度反馈公式</summary><div class="detail-body"><h3>基础速度和转向参考</h3><div class="equation"><div class="mathline">v<sub>ref</sub> = σ min(0.08, √[2·0.04·max(L−0.04,0)], 0.065/|κ|)</div><div class="mathline">ω<sub>ref</sub> = clip(v<sub>ref</sub>κ + 0.8e<sub>ψ</sub> + 0.8σe<sub>y</sub>, ±0.09)</div><div class="eq-note">σ 为前后方向；L 为剩余路径长度；κ 为路径曲率；e_ψ、e_y 分别为航向和横向偏差。κ=0 时省略曲率限速项。</div></div><h3>1. 平面状态与动作</h3><div class="equation"><div class="mathline">s<sub>B</sub> = [x<sub>B</sub>, y<sub>B</sub>, ψ<sub>B</sub>]<sup>T</sup>,　u = [v, ω]<sup>T</sup></div><div class="mathline">ṡ<sub>B</sub> = [v cos ψ<sub>B</sub>, v sin ψ<sub>B</sub>, ω]<sup>T</sup></div></div>
-<h3>2. 地图上的运动原语搜索</h3><p>每段前进或后退 0.16 m，分成 4 个样本；曲率候选为 −2、−1.25、−0.6、0、0.6、1.25、2 m⁻¹。搜索最多 3500 节点，启发项权重 1.35。它是有预算限制的在线搜索，不保证全局最优。</p><div class="equation"><div class="mathline">ΔJ<sub>path</sub> = 0.16c<sub>dir</sub> + 0.012|κ| + 0.012|κ−κ<sub>prev</sub>|</div><div class="eq-note">前进 c_dir=1，后退 c_dir=1.7；倾向减少后退、急转与曲率突变。</div></div>
-<h3>3. 路径跟踪与速度反馈</h3><p>取附近路径点和约 3 个样本后的目标点，由航向变化估计曲率。先计算这里的 v_ref、ω_ref，再使用自身实测速度反馈：</p><div class="equation"><div class="mathline">v<sub>des</sub> = clip[v<sub>ref</sub> + 0.5(v<sub>ref</sub>−v<sub>meas</sub>), ±0.08]</div><div class="mathline">ω<sub>des</sub> = clip[ω<sub>ref</sub> + 0.5(ω<sub>ref</sub>−ω<sub>meas</sub>), ±0.09]</div></div>
-<p>所以 0.065/|κ| 是基础参考速度的曲率约束，不应描述成每时刻实际速度都严格满足这个值。0.065 和 ±0.09 是该版本的工程设置；没有厂家额定值或能力标定来证明它们就是实际机器人极限。</p>
-<h3>4. 最终指令检查</h3><p>控制决策名义每 0.2 仿真秒一次，路径约每 2 秒重新规划。约束线加速度 0.04 m/s²、角加速度 0.08 rad/s²。r177 可尝试 1、0.75、0.5、0.25、0 倍动作，检查滞后/即时响应和制动轨迹；都未接受时请求制动。检查依赖地图与简化执行假设，不是安全证明。</p><div class="source-note"><b>对应归档依据：</b><br>r177 · controller.py<br>r177 · navigation.py<br>r177 · command_guard.py<br>r177 · config.json</div></div></details><details><summary>展开左右轮、双臂和升降的执行关系</summary><div class="detail-body"><h3>速度与转向转成左右轮速</h3><div class="equation"><div class="mathline">Ω<sub>L</sub> = (v − bω/2)/r</div><div class="mathline">Ω<sub>R</sub> = (v + bω/2)/r</div><div class="eq-note">本轮轮距 b=0.48 m；轮半径 r=0.0862 m；Ω 单位为 rad/s。</div></div><h3>差速执行</h3><p>左右轮公式来自底盘运动学。归档执行中轮速目标变化率限制为 2 rad/s²；实际接触、驱动力与机构约束仍由物理仿真产生，指令不能代替测量结果。</p>
-<h3>地形到把手目标</h3><p>在观测到的轮下点拟合局部平面 z=ax+by+c，得到地面法向。板车期望姿态由该法向与当前行进方向组合，再通过固定把手偏移转换为两只手的目标。</p><div class="equation"><div class="mathline">n = [−a, −b, 1]<sup>T</sup>/√(a²+b²+1)</div><div class="mathline">p<sub>Hᵢ</sub><sup>*</sup> = p<sub>C</sub><sup>*</sup> + R<sub>C</sub><sup>*</sup>r<sub>CHᵢ</sub></div><div class="mathline">q<sub>arm,i</sub><sup>*</sup> = IK(p<sub>Hᵢ</sub><sup>*</sup>, R<sub>Hᵢ</sub><sup>*</sup>; q<sub>lift</sub>)</div></div>
-<p>升降根据双手平均高度差与可达性修正；归档执行按 120 Hz 更新，目标滤波时间常数 0.25 s，升降限速约 0.03 m/s，手臂关节限速约 0.2 rad/s。</p>
-<h3>这里缺了什么</h3><p>没有在同一个优化问题中求解底盘牵引、脚轮朝向、手部接触力、夹持约束和关节力矩。几何上可达或规划上能转，不意味着实际闭链机构一定能产生对应运动。r180 继承了这套执行方式。</p><div class="source-note"><b>对应归档依据：</b><br>r177 执行源文件：轮速、双臂与升降</div></div></details>
+<section id="terminal-change">
+  <h2>4. 终点附近怎么改：准备倒车时，让转弯顺着接下去</h2>
+  <p class="lead">想象你推着车到了一个狭窄拐角：车还在往前走，接下来需要往后退一点，同时转动车头，才能对准出口。这一节就用这个例子，解释本次改动。</p>
+  <p><strong>前进和倒退之间切换，叫“换向”；车头向左或向右旋转，叫“转向”。</strong>这两件事可以分别调整。准备倒车时，前进速度必须先降到零，车头仍可以继续转动。</p>
+
+  <h3>先看清楚：导航、Keep 和执行器各负责什么</h3>
+  <div class="table-wrap"><table><thead><tr><th>环节</th><th>在这个例子中做什么</th></tr></thead><tbody>
+    <tr><td>r177 导航</td><td>根据当前位置和已观测的路面，提出“接下来往后退、同时向左转”的运动建议。</td></tr>
+    <tr><td>带 Keep 的优化器</td><td>计算退多快、转多快、怎样加减速；同时考虑路线、运动限制和货物受力，生成接下来几秒的运动曲线。</td></tr>
+    <tr><td>几何检查与执行器</td><td>检查所选运动能否通过已观测区域，再把这条曲线换成连续的左右轮命令。</td></tr>
+  </tbody></table></div>
+  <p>之前接入 Keep 时，这几个环节之间增加了参考生成和换向停车规则。本次主要修正其中两处：<strong>给优化器的要求要一致；准备倒车时，去掉额外要求转向也停下来的规则。</strong></p>
+
+  <h3>第一处：别让优化器同时收到“往前走”和“往后退”的要求</h3>
+  <p>“参考”就是<strong>希望接下来怎样走</strong>：过一会儿到哪里、车头朝哪里、以多快的速度前进或倒退。它是给优化器的目标，最终动作还要结合货物受力和各项限制计算。</p>
+  <p>之前，未来位置从导航路径上取点，速度则取导航当前给出的建议。终点附近的短路径可能包含前进、倒退等多个动作，两种处理凑在一起时，位置随时间的变化可能与配套速度对不上。</p>
+  <div class="example-box">
+    <p><strong>用一个直线小例子看这种矛盾。</strong>假设车头方向暂时不变，正方向是车头前方；每 0.5 秒看一次参考位置。</p>
+    <div class="table-wrap"><table class="numeric"><thead><tr><th>给优化器的要求</th><th>现在</th><th>0.5 秒后</th><th>1 秒后</th></tr></thead><tbody>
+      <tr><td>位置参考：持续向前移动</td><td>0 cm</td><td>前方 2 cm</td><td>前方 4 cm</td></tr>
+      <tr><td>速度参考：始终以 4 cm/s 倒退时，对应的位置</td><td>0 cm</td><td>后方 2 cm</td><td>后方 4 cm</td></tr>
+    </tbody></table></div>
+    <p>两行要求对不上：跟住第一行的位置，就得往前走；跟住第二行的速度，就得往后退。优化器必须在这两个冲突的目标之间折中。</p>
+    <p class="muted">这里的数字用于解释参考之间的矛盾。判断的是整段参考位置怎样随时间变化；单独一个目标点在前方，并不代表当前就不能倒车。</p>
+  </div>
+  <p><strong>现在的做法：</strong>取导航同一次给出的速度和转向建议，从机器人当前位置出发，把“按这个建议走一小段，会到哪里、朝哪里”算出来。用同一次计算得到位置、朝向、速度和转向参考，四项要求就能对上。</p>
+  <p>在上面的例子中，如果导航建议倒退，就生成随时间向后的参考位置；如果还建议左转，就生成倒退并转弯的参考。每次控制更新，再根据当前位置和最新导航建议重新计算未来 3 秒。车本来还在前进时，实际命令仍要按加减速限制，逐渐减速后再倒退。</p>
+
+  <h3>第二处：前进切换到倒退时，车头不用被额外要求停转</h3>
+  <div class="two-col maneuver-compare">
+    <div class="example-box"><h3>之前新增的处理</h3><p>一旦判断需要换成倒车，就先安排一次完整停车：把前进速度和转向角速度都降到零。等这段停车计划执行完，再重新开始倒车和转向。</p><p>如果终点附近来回调整方向，就可能多次出现“停下来，再重新动”的过程。这套额外停车规则是在接入 Keep 时加入的，原 r177 没有它。</p></div>
+    <div class="example-box"><h3>本次改成的处理</h3><p>让前进速度逐渐减小，经过零，再变成倒退速度。与此同时，转向由优化器继续安排。</p><p><strong>换向规则不再强制把转向也归零。</strong>如果当前动作需要继续转弯，就允许边减速、边转弯，接着倒退；是否继续转、转多快，仍由优化结果决定。</p></div>
+  </div>
+  <div class="flow" aria-label="前进切换到倒退的动作示意">
+    <div><b>还在前进</b><p>前进速度为正。<br>同时按需要转向。</p></div>
+    <div><b>逐渐减速</b><p>前进越来越慢。<br>转向仍可继续。</p></div>
+    <div><b>平移速度过零</b><p>这一刻前后方向不移动。<br>车头仍可转动。</p></div>
+    <div><b>开始倒退</b><p>速度变成负值。<br>继续调整朝向。</p></div>
+  </div>
+  <p>上面是允许采用的动作过程示意。左右轮差速驱动可以做到“车身不前进、车头继续转”：让左右轮朝相反方向转动即可。实际优化还要满足轮速、加速度、jerk 和几何检查。</p>
+  <p>这里的 jerk 用来限制加速度变化得多快。例如从匀速开始减速，可以逐渐加上刹车力度，让前进、减速和倒退之间的命令平顺衔接。</p>
+
+  <h3>整个过程中，Keep 怎样决定退多快、转多快</h3>
+  <p>导航表达“往后退，同时左转”的意图。Keep 所在的优化器进一步调整倒退速度、转向速度和变化快慢：每种候选运动会产生不同的车板加速度和角加速度，模型据此计算货物所需的接触力。</p>
+  <p>如果某种动作让受力残差较大，它的货物代价就更高；优化器会把它与路线跟踪、平顺性一起权衡。<strong>本次改的是怎样把导航建议交给优化器，以及怎样衔接换向；货物受力项仍然参与动作选择。</strong></p>
+
+  <h3>算好以后，怎样把动作交给车轮</h3>
+  <p>优化器给出一条随时间变化的速度和转向曲线。执行器约每 <strong>8.3 毫秒</strong>取一次曲线上的值，也就是 <strong>120 Hz</strong>，转换成左右轮目标速度。这样，加速、减速、转弯的过程都体现在实际发出的命令里。</p>
+  <p>下一次更新计划时，新曲线接上旧曲线当时的速度和加速度，避免刚换计划就跳到另一组数值。这里连续衔接的是<strong>已下发的运动命令</strong>；底盘位置和朝向根据自身观测更新，实际轮速也会读取。</p>
+
+  <h3>需要停车时，仍然停车，并让减速计划按时执行完</h3>
+  <p>到达目标、当前没有可用路径，或正常运动没有求出可执行方案时，控制器仍会使用减速停车计划。“有限时长停车”的意思是给这段减速计划确定结束时间，让它执行完；下一次控制更新时，继续检查并执行剩余部分。</p>
+  <p>这样可以避免每次重算都把“停下来的时间”往后推。如果剩余停车轨迹也无法通过检查，就交给原有应急制动处理。</p>
+
+  <h3>215.8 秒与 281.4 秒，分别发生了什么</h3>
+  <div class="table-wrap"><table class="numeric"><thead><tr><th>本次仿真时刻</th><th>实际发生的事情</th></tr></thead><tbody>
+    <tr><td>215.0 s</td><td>原导航首次判断：在当前已观测的地图上，目标位置已经连通，可以使用新的终点参考方式。</td></tr>
+    <tr><td>215.8 s</td><td>此前已经开始的一段停车计划执行完，首次使用本节介绍的新终点跟踪方式。</td></tr>
+    <tr><td>281.4 s</td><td>控制器报告到达目标，之后继续完成物理停车收尾。</td></tr>
+  </tbody></table></div>
+  <p><strong>Keep 在此前运输中就已经参与。</strong>215.8 秒记录的是新终点参考方式首次开始执行。切换条件看当前地图是否连通到目标，这些秒数是本次运行的记录值。</p>
+  <p>本次已到达终点，出口台阶处的车板越界仍需修正。位移、耗时和边界口径见<a href="documents/keep_model_expert_review.html">详细公式文档第 14 节</a>，下方保留两段完整运输视频。</p><details id="terminal-equations"><summary>展开：上面这些做法对应的公式、控制条件和代码</summary><div class="detail-body">
+    <p>v<sub>des</sub>、ω<sub>des</sub> 是原导航本次给出的速度与角速度建议。先选平移参考比例 s，再用同一组 v<sub>r</sub>、ω<sub>r</sub> 计算未来位置和朝向：</p>
+    <div class="equation" aria-label="一致的终点位置速度参考">
+      <span class="mathline">v<sub>r</sub> = s v<sub>des</sub>,　ω<sub>r</sub> = ω<sub>des</sub>,　s ∈ {1, 0.5, 0}</span>
+      <span class="mathline">ψ<sub>r</sub>(τ) = ψ<sub>0</sub> + ω<sub>r</sub> τ</span>
+      <span class="mathline">p<sub>r</sub>(τ) = p<sub>0</sub> + ∫<sub>0</sub><sup>τ</sup> v<sub>r</sub> [cos(ψ<sub>0</sub> + ω<sub>r</sub> t), sin(ψ<sub>0</sub> + ω<sub>r</sub> t)]<sup>T</sup> dt</span>
+    </div>
+    <p>s = 1 是原平移参考，0.5 是减半，0 是不要求平移；转向参考保持原导航建议。调度器先尝试原参考，几何拒绝后才按既有顺序尝试降低平移的参考，每次都重新联合优化动作和接触力。</p>
+    <p>触发条件来自原导航的 <code>goal_observed</code>，表示目标在当前已观测支撑网格中连通。它会随地图更新重新判断；本次在 217–219 s 曾暂时变为假，随后恢复。</p>
+    <p>新终点跟踪不再固定整段速度的正负号，允许速度连续过零；当前命令的速度、加速度，以及速度、加速度、jerk 和车轮限制继续保留。目标停车、无路径停车和回退停车仍执行原定的有限时长计划。</p>
+    <p>记录中检查到 303 个采用新终点参考的数学候选，货物项均开启。全程执行核对中，1,033 条实际发布计划均能对应到轮侧发令记录。终点参考与换向衔接是本项目的工程适配；上节五点说明了其中使用的 Keep 思想。</p>
+    <p class="muted">代码与记录：终点参考策略、整车接入、停车计划衔接、执行核对。</p>
+  </div></details>
 </section>
 
-<section id="r180">
-<h2>r180 加了什么物理模型</h2>
-<p>最主要的变化是：<strong>不再直接沿用原来的速度选择规则，而是先预测几种推法会产生什么运动，再做选择。</strong></p>
-<ol>
-<li><strong>把板车和货物合成一个整体。</strong>算出总质量、重心和转动惯量，用来表示它有多重、重量偏在哪里、被晃起来有多难。</li>
-<li><strong>分别看四个轮子下面的地形。</strong>某个轮子先遇到坡折，就给它不同的高度输入，而不是只看整车平均坡度。</li>
-<li><strong>沿着受力关系往后算。</strong>轮下高度变化会改变支撑力；支撑力的大小和作用位置，又会造成车体上下起伏、左右侧倾和前后俯仰。</li>
-<li><strong>比较候选动作。</strong>尝试 25 组速度与转向，预测未来 1.5 秒，综合看目标距离、动作变化、障碍余量、晃动和推力，再选择一个通过检查的动作。</li>
-</ol>
-<div class="mechanism"><svg class="diagram" viewbox="0 0 610 270" role="img" aria-label="单轮遇到地形变化，通过接触力和力矩造成车体上下运动与倾斜">
-<path d="M15 215H185L275 185H585" stroke="#718b9a" stroke-width="7" fill="none"></path><path d="M55 139L511 111" stroke="#142c3b" stroke-width="15"></path><rect x="205" y="53" width="148" height="62" rx="4" fill="#d5e4ec" stroke="#7e9ba9" stroke-width="2" transform="rotate(-4 280 84)"></rect>
-<circle cx="116" cy="190" r="24" fill="#fff" stroke="#142c3b" stroke-width="6"></circle><circle cx="458" cy="159" r="24" fill="#fff" stroke="#142c3b" stroke-width="6"></circle>
-<path d="M116 142L106 150L126 158L106 165L116 170M458 118L448 126L468 134L458 139" stroke="#246cae" stroke-width="3" fill="none"></path>
-<path d="M458 243V200L450 211M458 200L466 211" stroke="#be542d" stroke-width="4"></path><text x="476" y="239" font-size="24" fill="#be542d">支撑力</text>
-<circle cx="280" cy="85" r="6" fill="#be542d"></circle><path d="M280 85V158L272 146M280 158L288 146" stroke="#be542d" stroke-width="3"></path><text x="294" y="153" font-size="22" fill="#be542d">重力</text>
-<text x="35" y="43" font-size="22" fill="#246cae">板车的起伏与倾斜</text><text x="23" y="260" font-size="18" fill="#5d707a">局部侧视示意，非按比例；四轮在方程中分别计算</text></svg></div>
-<p><strong>这一点和我们要研究的“单轮颠簸、重量不均”是相关的。</strong>因为四个轮子接受不同的地形输入，重心位置也会影响它们如何分担支撑力。</p>
-<p class="note">但预测器假设货物和板车没有相对滑动。真实仿真里的货物仍是自由堆叠的，所以可能出现“模型认为整体还好，实际箱子已经滑了”。</p>
-<details><summary>展开模型状态、预测窗口和连接关系</summary><div class="detail-body"><h3>真正调用的实现</h3><p>在线调用的是 <b>action_selector.ActionSelector → batch_predictor.BatchModel.predict_many</b>。physical_model.py 提供参数与基础方程，但标量版本中的诊断标志，不能自动算作批量在线选择器正在执行的约束。</p>
-<h3>状态分层</h3><div class="equation"><div class="mathline">s = [x<sub>B</sub>, y<sub>B</sub>, ψ<sub>B</sub>, v, ω, q<sup>T</sup>, q̇<sup>T</sup>]<sup>T</sup></div><div class="eq-note">合起来是 11 个状态量；其中垂向、侧倾、俯仰是 3 个二阶动力学自由度。</div></div>
-<p>水平面运动采用有加速度限制的运动学；垂向与姿态采用等效接触动力学。不是一个完整 6 自由度刚体接触求解器，更不是每箱货物的多体系统。</p>
-<h3>连接关系</h3><p>r180 每次根据自身编码器估计当前机器人—板车平面偏移 d，而不是一直使用起始偏移。但一次 1.5 秒预测内将这个偏移冻结，并近似用底盘航向旋转车轮布局；没有额外的脚轮转向状态。</p>
-<h3>滚动重算</h3><p>所有候选从同一组当前估计 q、q̇ 出发，不分别重新初始化到静平衡。每次约 0.2 仿真秒重新选动作，只执行当前指令，再依据新观测重算。</p><div class="source-note"><b>对应归档依据：</b><br>r180 · controller.py<br>r180 · action_selector.py<br>r180 · batch_predictor.py<br>r180 · physical_model.py</div></div></details><details><summary>展开总质量、重心和惯量的计算</summary><div class="detail-body"><h3>总质量来源</h3><p>板车主体 6.5 kg + 四个 0.1 kg 轮叉 + 四个 0.2 kg 轮子 + 10 kg 货物 = 17.7 kg。货物参数来自场景配置，板车主体惯量有近似，部分把手体积未纳入。</p>
-<h3>质量、重心与惯量</h3><div class="equation"><div class="mathline">m = ∑<sub>j</sub>m<sub>j</sub>,　c = (1/m)∑<sub>j</sub>m<sub>j</sub>c<sub>j</sub></div><div class="mathline">d<sub>j</sub> = c<sub>j</sub> − c</div><div class="mathline">I<sub>C</sub> = ∑<sub>j</sub>[I<sub>j</sub> + m<sub>j</sub>(d<sub>j</sub><sup>T</sup>d<sub>j</sub>I<sub>3</sub> − d<sub>j</sub>d<sub>j</sub><sup>T</sup>)]</div></div>
-<p>本轮 c≈[−0.00113, 0, 0.20909] m；I 的对角项约 [0.47152, 0.75046, 0.82278] kg·m²。文件保留了非零 I<sub>xz</sub>≈0.05287 kg·m²，但实际垂向/侧倾/俯仰动力学采用对角质量矩阵，忽略完整转动耦合。</p>
-<h3>“偏载会影响受力”是什么机制</h3><div class="equation"><div class="mathline">X<sub>i</sub> = x<sub>i</sub> − c<sub>x</sub>,　Y<sub>i</sub> = y<sub>i</sub> − c<sub>y</sub></div><div class="mathline">静止无额外力矩时：∑N<sub>i</sub> = mg,　∑Y<sub>i</sub>N<sub>i</sub> = 0,　∑X<sub>i</sub>N<sub>i</sub> = 0</div></div>
-<p>重心变化会改变每个轮子的力臂，并改变满足力与力矩平衡所需的轮载。以上平衡式用于说明机制；实际预测继续使用下一个折叠区的弹性接触动态方程。</p>
-<div class="warning">当前参数是运行前写入的固定参数，并未实现“货物滑移后在线重新估计重心”。本轮没有验证多个偏载设置的预测正确性。</div><div class="source-note"><b>对应归档依据：</b><br>r180 · physical_parameters.json<br>r180 · physical_model.py</div></div></details><details><summary>展开四轮接触、推力、车体运动与积分过程</summary><div class="detail-body"><h3>1. 坐标与状态</h3><p>车体坐标为 x 向前、y 向左、z 向上；q=[z,φ,θ]ᵀ。z 是重心投影处的等效支撑面高度，而非某个货物质心的精确高度；俯仰 θ 正向为低头。采用小角度关系：</p><div class="equation"><div class="mathline">B<sub>i</sub> = [1, Y<sub>i</sub>, −X<sub>i</sub>],　z<sub>i</sub> = B<sub>i</sub>q</div><div class="mathline">M = diag(m, I<sub>x</sub>, I<sub>y</sub>)</div></div>
-<h3>2. 从观测地形提取每个轮子的输入</h3><div class="equation"><div class="mathline">p<sub>i</sub><sup>W</sup> = p<sub>B</sub> + R(ψ<sub>B</sub>)(d + s<sub>i</sub>)</div><div class="mathline">h<sub>i</sub> = H(p<sub>i</sub><sup>W</sup>),　δ<sub>i</sub> = h<sub>i</sub> − B<sub>i</sub>q</div><div class="mathline">δ̇<sub>i</sub> = ḣ<sub>i</sub> − B<sub>i</sub>q̇</div></div>
-<p>s_i 是轮子在板车平面坐标中的位置，d 是当前估计的底盘—板车偏移。H 在观测地图中插值；预测轮下未知或被阻挡时该候选不被当成有效支撑路径。</p>
-<h3>3. 单边弹簧阻尼支撑</h3><div class="equation"><div class="mathline">N<sub>i</sub> = max(0, k<sub>i</sub>δ<sub>i</sub> + d<sub>i</sub>δ̇<sub>i</sub>)　若 δ<sub>i</sub> ≥ 0；否则 N<sub>i</sub> = 0</div></div>
-<p>k_i 单位 N/m，d_i 单位 N·s/m。轮子可以卸载；支撑法向力不允许为负。本轮用四个相同的未标定等效接触，不是从轮胎与地面实测识别出的接触模型。</p>
-<h3>4. 由平面运动估计需要的推力</h3><div class="equation"><div class="mathline">r = d + [c<sub>x</sub>, c<sub>y</sub>]<sup>T</sup></div><div class="mathline">a<sub>∥</sub> = <span class="matrix"><span>v̇ − ω̇r<sub>y</sub> − ω²r<sub>x</sub></span><span>vω + ω̇r<sub>x</sub> − ω²r<sub>y</sub></span></span></div><div class="mathline">g<sub>∥</sub> = [g sin θ, −g sin φ]<sup>T</sup></div><div class="mathline">F = m(a<sub>∥</sub> − g<sub>∥</sub>) + [c<sub>rr</sub>mg tanh(v/0.005), 0]<sup>T</sup></div></div>
-<p>包含加速、转弯向心与重力切向分量；本轮 c_rr=0，滚阻并未被识别。预测推力只是计算量，不是实际手部力传感器读数。</p>
-<h3>5. 受力方程与数值推进</h3><div class="equation"><div class="mathline">M q̈ = B<sup>T</sup>N + [−mg, −ℓF<sub>y</sub>, ℓF<sub>x</sub>]<sup>T</sup></div><div class="mathline">ℓ = h<sub>push</sub> − c<sub>z</sub></div><div class="mathline">q̇<sub>k+1</sub> = q̇<sub>k</sub> + Δt q̈<sub>k</sub></div><div class="mathline">q<sub>k+1</sub> = q<sub>k</sub> + Δt q̇<sub>k+1</sub></div></div>
-<p>采用半隐式积分，步长不大于 0.002 s，并根据等效刚度/阻尼的特征频率继续限制。水平运动按加速度限幅与中点近似推进。q̇ 从连续姿态估计差分并滤波得到；所有候选从同一当前状态出发。</p>
-<div class="warning">这些是降阶近似方程，省略了完整惯性耦合、脚轮转向动力学、真实夹持柔性与箱体接触。不能把该模型的峰值加速度直接当作仿真实际冲击测量。</div><div class="source-note"><b>对应归档依据：</b><br>r180 · batch_predictor.py<br>r180 · physical_model.py<br>r180 · observed_input.py<br>r180 · action_selector.py</div></div></details><details><summary>展开候选动作与完整评分公式</summary><div class="detail-body"><h3>具体候选集合</h3><div class="equation"><div class="mathline">v ∈ {−0.08, −0.04, 0, 0.04, 0.08} m/s</div><div class="mathline">ω ∈ {−0.09, −0.045, 0, 0.045, 0.09} rad/s</div><div class="eq-note">两组组合成 25 个候选；每组保持目标动作预测 1.5 秒，约每 0.2 仿真秒重新计算。</div></div><h3>完整选择问题</h3><div class="equation"><div class="mathline">u<sup>*</sup> = arg min<sub>u∈U, checks(u)=pass</sub> J(u)</div><div class="mathline">J(u) = J<sub>track</sub> + J<sub>change</sub> + J<sub>space</sub> + 100J<sub>phys</sub></div></div>
-<p>U 为这里 25 组恒定目标动作。它属于枚举候选的滚动预测控制原型，并非对整段时变控制序列做连续最优求解，也没有复现完整 Keep 或 MPAC 论文算法。</p>
-<h3>目标跟踪与指令变化代价</h3><div class="equation"><div class="mathline">J<sub>track</sub> = (‖p(H)−p<sub>target</sub>‖/0.1)²</div><div class="mathline"><span style="padding-left:105px">+ 0.1(wrap[ψ(H)−ψ<sub>target</sub>]/0.15)²</span></div><div class="mathline">J<sub>change</sub> = 0.01((v<sub>c</sub>−v<sub>meas</sub>)/0.08)²</div><div class="mathline"><span style="padding-left:120px">+ 0.01((ω<sub>c</sub>−ω<sub>meas</sub>)/0.09)²</span></div></div>
-<p>目标取当前路径索引之后第 3 个样本，通常约 0.12 m 前视；变化项相对于当前实测速度，而不是过去 baseline 的速度。目标距离、候选速度、预测时间的配合直接影响排名。</p>
-<h3>空间余量偏好</h3><div class="equation"><div class="mathline">J<sub>space</sub> = mean<sub>k≥1</sub>[(σ/(σ+r<sub>k</sub>))²] − (σ/(σ+r<sub>cap</sub>))²</div><div class="mathline">σ = 0.04 m,　r<sub>cap</sub> = 3σ = 0.12 m</div></div>
-<p>r_k 是依据观测障碍、当前车体包络与栅格余量计算并截断的剩余距离。当前共同起点不参与平均；偏好未来留出空间。这是采样的软偏好，不等于连续碰撞或运输安全证明。</p>
-<h3>物理代价与接受条件</h3><div class="equation"><div class="mathline">J<sub>phys</sub> = (1/H)∫<sub>0</sub><sup>H</sup>[(z̈/g)² + φ̇² + θ̇² + 0.05(‖F‖/(mg))²]dt</div></div>
-<p>这里惩罚的是倾斜<b>变化率</b>而非倾角本身；没有直接加入摩擦利用率、轮子卸载、货物相对位移、持续前进或反复换向的代价。这些分量的量纲/尺度依赖人为权重，不能将分数称为能量或概率。</p>
-<p>在线按分数排序，先做扫掠检查，再核对经变化率限制后即将发出的指令与制动情况。r180 不允许通过缩放被选动作来悄悄替换预测；没有候选通过时请求零目标/制动，但这也不证明实际系统一定安全停住。</p><div class="source-note"><b>对应归档依据：</b><br>r180 · action_selector.py<br>r180 · clearance_cost.py<br>r180 · batch_predictor.py<br>r180 · command_guard.py</div></div></details><details><summary>展开参数数值、来源和摩擦风险的计算</summary><div class="detail-body"><h3>接触不确定性</h3><p>参数文件另列 k∈[5000,20000] N/m、d∈[50,200] N·s/m 的敏感性范围，但这些只是建模假设，不是实测置信区间，也没有在本次在线决策中做区间鲁棒计算。</p>
-<h3>摩擦诊断的计算</h3><div class="equation"><div class="mathline">ρ = <span class="frac"><span class="num">‖a<sub>∥</sub>−g<sub>∥</sub>‖</span><span class="den">μ max(g+z̈, ε)</span></span></div><div class="eq-note">可粗略理解为切向需求 / 名义摩擦能力；不是逐箱接触求解，也不是标定后的失稳概率。</div></div>
-<p>批量预测器记录 ρ 的峰值、最小轮载与倾角峰值，但 action_selector 中的有效性筛选主要来自已知支撑、路径几何与最终指令检查。标量 Model.predict 中存在 model_limit_exceeded，不等于在线 BatchModel 已按它拒绝动作。</p>
-<div class="warning"><b>额外发现的参数来源问题：</b>归档参数文字把 0.655 写成 0.45 与 0.76 的算术平均，但该平均实际是 0.605。因此不能把 0.655 介绍成已核实的接触混合结果。此展示仅如实披露归档值与来源不一致，没有更改原运行文件。</div>
-<h3>实际含义</h3><p>错误或未标定的 μ 会影响诊断解释；因为这个摩擦比没有进入本轮评分或硬约束，不能直接据此解释 r180 的动作退化。k、d 和权重则直接参与预测与排序，可能改变实际选择；具体影响仍需独立验证。</p><div class="source-note"><b>对应归档依据：</b><br>r180 · physical_parameters.json<br>r180 · batch_predictor.py<br>r180 · action_selector.py<br>r180 · physical_model.py</div></div></details>
+<section id="videos">
+  <h2>完整运输视频</h2>
+  <p>两段均从仿真 41 s 的运输开始播放，保留到物理收尾，均为原速。原 r177 在 222.2 s 到达，本次在 281.4 s 到达；视频另包含约 1.5 秒停车收尾。</p>
+  <div class="two-col video-full">
+    <div class="media-card"><h3 class="baseline">原 r177 · 完整运输</h3><video controls preload="none" playsinline poster="media/r177_final.png" src="media/r177_full_transport_1x.mp4" aria-label="原 r177 全程原速运输视频">浏览器不支持视频，请打开<a href="media/r177_full_transport_1x.mp4">r177 完整视频</a>。</video><p class="caption">完整视频 182.75 秒 · 3,655 帧 · 20 fps<br>源仿真 41.00–223.70 s</p></div>
+    <div class="media-card keep"><h3 class="current">本次 r177 + Keep · 完整运输</h3><video controls preload="none" playsinline poster="media/keep_final.png" src="media/keep_r177_full_transport_1x.mp4" aria-label="本次 r177 加 Keep 全程原速运输视频">浏览器不支持视频，请打开<a href="media/keep_r177_full_transport_1x.mp4">本次完整视频</a>。</video><p class="caption">完整视频 241.95 秒 · 4,839 帧 · 20 fps<br>源仿真 41.00–282.90 s</p></div>
+  </div>
 </section>
 
-
-<section id="r198">
-<h2>r198：让底盘带着整组走，双臂和升降一起配合</h2>
-<p><strong>这是后来实际跑完全程的适配版本。</strong>它不再像早期 r189 那样先让板车独立领行，而是从底盘可执行的前进、后退和整组转弯出发，再计算板车与双手该怎样一起移动。</p>
-<ol><li><strong>先按整组尺寸找路。</strong>复用 r177 的在线搜索方法，把机器人与板车的轮廓、轮下支撑一起考虑；路线根据本轮相机观测重新计算。</li>
-<li><strong>预测底盘带动板车的运动。</strong>转弯时允许自由脚轮板车出现横向速度，避免把本来能随整组转过去的动作排除掉。</li>
-<li><strong>同时优化底盘、双臂和升降。</strong>看未来 5 秒，在跟随路径时保持双手能握住把手、关节可达、与观测障碍有距离，并留出停车动作。</li>
-<li><strong>让一段动作真正执行下去。</strong>按实际进展推进在线路径，换向先停，不再周期性把尚未走完的调整段随意替换；新观测仍持续进入检查。</li></ol>
-<details id="r198-motion"><summary>展开：底盘怎样带动板车，为什么允许板车横向运动</summary><div class="detail-body">
-<h3>1. 使用当前两车的相对位置</h3>
-<p>0 表示底盘，C 表示板车；p 为平面位置，θ 为平面朝向。r 是从底盘中心指向板车中心的向量，由当前自身位姿、编码器与把手关系估计。下面是当前实际运行的 base_led 方程，不是 r189 的板车领行方程。</p>
-<div class="equation"><div class="mathline">h(α)=[cos α,sin α]<sup>T</sup>,　r = p<sub>C</sub>−p<sub>0</sub></div><div class="mathline">r = r<sub>F</sub>h(θ<sub>0</sub>) + ℓh(φ) + r<sub>L</sub>h(θ<sub>C</sub>)</div><div class="mathline">θ<sub>1</sub>=φ−θ<sub>0</sub>,　θ<sub>2</sub>=θ<sub>C</sub>−φ,　θ<sub>0</sub>=θ<sub>C</sub>−θ<sub>1</sub>−θ<sub>2</sub></div><div class="eq-note">共享代码用虚拟连接线分解几何：r_F=0.20 m 是设计偏移，r_L=0.32 m 是把手偏移，ℓ 按当前几何更新。这里没有给机器安装实体连接杆。</div></div>
-<h3>2. 同一整组的平面运动</h3>
-<p>一次预测内保持当前平面相对角，底盘前进带着板车前进，底盘转动让板车绕底盘中心移动。这是刚体速度传递的运动学近似：</p>
-<div class="equation"><div class="mathline">u=[v<sub>0</sub>,ω<sub>0</sub>]<sup>T</sup>,　ṗ<sub>0</sub>=v<sub>0</sub>h(θ<sub>0</sub>)</div><div class="mathline">ṗ<sub>C</sub>=ṗ<sub>0</sub>+ω<sub>0</sub>[−r<sub>y</sub>,r<sub>x</sub>]<sup>T</sup></div><div class="mathline">θ̇<sub>C</sub>=ω<sub>0</sub>,　θ̇<sub>1</sub>=0,　θ̇<sub>2</sub>=0</div><div class="eq-note">第二项就是转动造成的横向速度。板车有自由脚轮，因此不再强迫它的中心速度只能朝板车正前方。</div></div>
-<h3>3. 写成用于优化的状态方程</h3>
-<div class="equation"><div class="mathline">x=[x<sub>C</sub>,y<sub>C</sub>,θ<sub>C</sub>,θ<sub>1</sub>,θ<sub>2</sub>]<sup>T</sup></div><div class="mathline">ẋ=[v<sub>0</sub>cos θ<sub>0</sub>−ω<sub>0</sub>r<sub>y</sub>, v<sub>0</sub>sin θ<sub>0</sub>+ω<sub>0</sub>r<sub>x</sub>, ω<sub>0</sub>,0,0]<sup>T</sup></div><div class="mathline">x<sub>k+1</sub>=RK4(x<sub>k</sub>,u<sub>k</sub>,Δt)</div><div class="mathline">v<sub>C,∥</sub>=h(θ<sub>C</sub>)<sup>T</sup>ṗ<sub>C</sub>,　v<sub>C,⊥</sub>=[−sin θ<sub>C</sub>,cos θ<sub>C</sub>]ṗ<sub>C</sub></div><div class="eq-note">RK4 将速度方程积分为未来状态。侧向速度 v_C,⊥ 可以非零；这不等于已模拟脚轮如何转向或轮胎如何受力。</div></div>
-<h3>这里的近似要说清楚</h3>
-<p>双臂与升降确实进入同一个优化，但它们主要配合地形和把手姿态，不是让板车与底盘在这段预测里任意改变平面相对角。下一次观测会重新估计相对关系。模型没有完整计算脚轮转向阻力、轮地牵引、夹持柔性和货物惯性反馈。</p>
-<p>归档里仍保留 LF 等其他分支，不能把“文件里有该公式”当成 r198 正在用它。当前前端生成 base_led 路径，实际优化按该模式运行。</p>
-<div class="source-note">base_led 运动方程与模式分支 · 本轮整组路径生成 · 同一方程的执行插值与地形检查</div>
-</div></details><details id="r198-mpc"><summary>展开：未来 5 秒具体优化什么，有哪些约束</summary><div class="detail-body">
-<h3>1. 同时求整段动作</h3>
-<p>25 个时间步，每步 0.2 s。优化量包括状态 x、底盘速度 u、12 个双臂关节位置 q，以及升降高度 l。板车运动由底盘带动整组的关系算出；本轮 base_led 模式中两项平面相对角保持当前值，不能把它们说成自由变化的关节决策。它与 r180 的区别是：这里优化一段可变化的动作序列，不是只枚举 25 个恒定目标动作。</p>
-<div class="equation"><div class="mathline">min<sub>X,U,Q,L</sub> J = ∑<sub>k=0</sub><sup>N−1</sup>[e<sub>k</sub><sup>T</sup>W e<sub>k</sub> + 0.1‖c<sub>k</sub>‖² + J<sub>arm,k</sub>] + e<sub>N</sub><sup>T</sup>W e<sub>N</sub></div>
-<div class="mathline">e<sub>k</sub> = x<sub>k</sub> − x<sub>ref,k</sub>,　c<sub>k</sub> = [v<sub>C,∥</sub>, ω<sub>C</sub>, v<sub>0</sub>, ω<sub>0</sub>]<sup>T</sup></div>
-<div class="mathline">W = diag(2, 2, 0.5, 0.1, 0.1),　N=25,　Δt=0.2 s</div>
-<div class="eq-note">第一项希望跟住在线搜索出的参考路径；第二项偏好较小速度。板车航向误差作角度环绕处理。权重是该实现的设置，不是已经标定的风险概率。</div></div>
-<div class="equation"><div class="mathline">J<sub>arm,k</sub> = 10<sup>−5</sup>‖q<sub>k+1</sub>−q<sub>k</sub>‖² + 0.001‖q<sub>k</sub>−q<sub>neutral</sub>‖²</div>
-<div class="mathline">　+ 0.01 ∑<sub>左右手</sub>[3 − tr((R<sub>H</sub><sup>*</sup>)<sup>T</sup>R<sub>H</sub>(q<sub>k</sub>,l<sub>k</sub>))]</div>
-<div class="eq-note">分别偏好关节变化较小、靠近舒适姿态，以及手腕朝向接近标定姿态。最后一项是软偏好，不是把手腕焊死在圆管上。</div></div>
-<p>v_C,∥ 是板车速度在自身朝向上的分量；转弯时它也可以有侧向分量。这个目标函数没有货物质量、重心、轮下冲击或滑移代价。它在优化“怎样配合着走”，没有优化 r180 那种载荷动态响应。</p>
-<h3>2. 运动与执行约束</h3>
-<div class="equation"><div class="mathline">x<sub>k+1</sub> = RK4(x<sub>k</sub>,u<sub>k</sub>,Δt),　(x<sub>0</sub>,q<sub>0</sub>,l<sub>0</sub>) = 当前估计</div>
-<div class="mathline">‖ṗ<sub>C</sub>‖, |v<sub>0</sub>| ≤ 0.08 m/s,　|ω<sub>C</sub>|, |ω<sub>0</sub>| ≤ 0.09 rad/s</div>
-<div class="mathline">|Δv| ≤ 0.04Δt,　|Δω| ≤ 0.08Δt</div>
-<div class="mathline">|θ<sub>1</sub>| ≤ 0.5,　|θ<sub>2</sub>| ≤ 0.7,　|θ<sub>1</sub>+θ<sub>2</sub>| ≤ 29.9°</div>
-<div class="mathline">q<sub>min</sub> ≤ q<sub>k</sub> ≤ q<sub>max</sub>,　|Δq| ≤ 0.20Δt,　|Δl| ≤ 0.03Δt</div>
-<div class="mathline">u<sub>N−1</sub>=0,　q<sub>N</sub>=q<sub>N−1</sub>,　l<sub>N</sub>=l<sub>N−1</sub></div>
-<div class="eq-note">角速度单位 rad/s，关节角 rad，升降 m。初始物理关节范围与未来命令余量分别处理；底盘也检查每段首末速度的连续性。预测末端要求停住，防止只规划“前面能走”，却不留停止空间。</div></div>
-<p>上面的速度变化约束按代码作用于底盘与板车纵向速度分量等命令量，不是完整三维加速度界。还要求当前路径段的前后方向一致，换向先制动。这些速度上限、角度范围和余量都是归档实现的控制设置。特别是 0.09 rad/s，并没有被证明是厂家规定的最大转速。这里披露旧版本实际设置，不把它当成物理定律。</p>
-<h3>3. 跟着地形更新并复核</h3>
-<p>先从当前观测地图分别估计底盘、板车将经过的高度与倾斜，再求联合轨迹，并迭代更新地形上下文。解出后还要检查插值过程中的夹持关系、各部件扫过的空间和轮下支撑。不能只凭优化器返回成功就执行。</p>
-<p>参考推进速度按 1、0.5、0.25、0 的比例尝试；每次重新求整套配合动作，不是单独把底盘变慢而让手臂照旧走。参考段按自身实际进展推进；保留尚未执行完的换向段，必要时再重新找路。每次新观测仍进入优化与最终检查，不是把一条旧路径盲目执行到底。</p>
-<div class="source-note">实际优化目标与约束 · 地形迭代、重新求解与执行 · 在线路径搜索</div>
-</div></details><details><summary>展开：避障约束、执行误差余量与连续运动检查</summary><div class="detail-body">
-<h3>把观测障碍放进优化</h3>
-<p>用当前机器人与板车的平面轮廓，计算它们到观测障碍点的有符号距离。每个预测步、每个车体选择参考附近的 6 个障碍点；这是一种轮廓适配，不是原论文形状与控制器的逐项复现。</p>
-<div class="equation"><div class="mathline">h<sub>k</sub>=d<sub>signed</sub>(障碍点,车体轮廓<sub>k</sub>)−m</div><div class="mathline">h<sub>k+1</sub>≥0,　h<sub>k+1</sub>≥0.1h<sub>k</sub></div><div class="eq-note">第一条保留距离余量；第二条限制一步内余量下降的程度。这是离散几何屏障约束（CBF），不是货物安全概率。</div></div>
-<h3>把自己刚才没跟准的误差也留出空间</h3>
-<div class="equation"><div class="mathline">ε<sub>k</sub>=max<sub>i≤k,部件b,顶点j</sub>‖a<sub>b,j</sub><sup>obs</sup>(t<sub>i</sub>)−â<sub>b,j</sub>(t<sub>i</sub>|t<sub>i−1</sub>)‖+10<sup>−5</sup> m</div><div class="mathline">m=0.04 m+栅格分辨率/√2+ε<sub>k</sub></div><div class="eq-note">只用本轮之前的一步预测与下一次自身观测，不用旧基线轨迹或未来真值。记录最大误差约 11.152 mm，新增规划余量约 11.162 mm。</div></div>
-<p>这是历史最大误差的经验余量，不保证下一步不会更大。它用于搜索与 MPC；最终完整几何检查仍用原有基础余量、栅格覆盖与各部件运动余量。</p>
-<h3>节点没碰，不代表中间没碰</h3>
-<p>优化之后，按每个物理部件检查整段运动扫过的空间，并核对地形与抓握。若粗时间区间的包围范围与障碍接近，继续细分；发现真实采样姿态侵入余量则拒绝，预算内仍分不清也拒绝。</p>
-<p>r198 修的是此前“粗区间余量相交就过早认定不能走”的问题，保留原距离要求。一次跑通不等于对所有连续轨迹或实机误差的安全证明。</p>
-<div class="source-note">障碍距离与 CBF · 自身一步几何误差 · 连续扫掠复核</div>
-</div></details><details><summary>展开：双手如何保持抓握，以及怎样从局部尝试走到全程</summary><div class="detail-body">
-<h3>夹持点对齐，圆管轴线对齐</h3>
-<p>由关节正运动学算手的位置和朝向，由板车姿态算把手的位置和轴线。约束两者接触点接近、轴线对齐；允许绕圆管轴线转动，不是完整三轴姿态锁死。</p>
-<div class="equation"><div class="mathline">e<sub>p</sub> = p<sub>H</sub> + R<sub>H</sub>r<sub>hand</sub> − (p<sub>C</sub> + R<sub>C</sub>r<sub>grasp</sub>)</div>
-<div class="mathline">α = acos((R<sub>H</sub>e<sub>z</sub>)<sup>T</sup>(R<sub>C</sub>e<sub>x</sub>))</div>
-<div class="mathline">未来优化节点：‖e<sub>p</sub>‖ ≤ 0.001 m,　α ≤ 0.01 rad</div>
-<div class="eq-note">r_hand、r_grasp 是各自坐标系中的标定接触点。当前测量不是可任意修改的优化量，因此初始残差另行处理。</div></div>
-<p>最终插值检查使用 3 mm / 0.02 rad 的接受条件；若初始实测残差已偏大，要求在首个 0.2 s 内减小到该范围。还检查已观测地面支撑与 4 cm 障碍余量。这些是程序检查容差，不是夹爪承载能力或运输安全认证。</p>
-<h3>从预测关节位置到电机目标</h3>
-<div class="equation"><div class="mathline">Δq<sub>0</sub> = q<sub>cmd,当前</sub> − q<sub>meas,当前</sub></div><div class="mathline">q<sub>cmd,k</sub> = q<sub>pred,k</sub> + Δq<sub>0</sub></div><div class="eq-note">升降同样处理。保留当前自身命令与测量的偏差，避免重新规划时把电机目标突然拉回实测位置。</div></div>
-<p>这只是短时伺服偏差近似，不是 GOB。GOB 要估计执行中的外力/扰动并补偿；r198 没有这一模块。底层仍由原有电机控制跟踪目标，没有统一求解轮地牵引、脚轮转向、双手受力与关节力矩。</p>
-<h3>这一系列怎样从局部尝试走到全程</h3>
-<p>r198 沿用了后续版本恢复的底盘带动整组运动、三维板车轮廓投影、保留在线动作段，以及自身跟踪误差余量。相比直接前一版 r197，r198 只修连续扫掠检查的时间细分：粗区间余量擦到障碍时，继续细分核实，不再仅因固定采样下限而提前拒绝。</p>
-<p>若实际采样姿态侵入原有余量，仍拒绝；若计算预算耗尽还不能确认，也拒绝。不是降低 4 cm 几何余量或允许穿墙。这个修正后的单次全程结果已确认；不能把整个系列与 r177 的差异只归因于最后这一项。</p>
-<div class="source-note">夹持与双臂模型 · 逐部件运动与自适应扫掠检查 · 在线动作段与执行接口</div>
-</div></details>
-</section>
-
-<section id="results">
-<h2>实际结果：三版都跑通，平稳程度不同</h2>
-<h3>本场景单次全程记录</h3>
-<p>三版均使用本场景、居中 10 kg 自由堆叠货物，记录了全程完成。下面并列实际结果：<strong>r198 跑通了，但货物滑移和倾角仍比 r177 大。</strong>各版改变了多项算法，表格不是单因素因果试验，也不是统计成功率。</p>
-<div class="table-wrap"><table class="version-table"><thead><tr><th>观测项</th><th>r177</th><th>r180</th><th>r198</th></tr></thead><tbody>
-<tr><td>任务全程</td><td>完成</td><td>完成</td><td>完成</td></tr>
-<tr><td>总仿真时间</td><td>223.7 秒</td><td>303.7 秒</td><td>288.5 秒</td></tr>
-<tr><td>全箱最大水平滑移</td><td>15.0 毫米</td><td>51.9 毫米</td><td>64.1 毫米</td></tr>
-<tr><td>最大相对倾角</td><td>1.67°</td><td>4.21°</td><td>5.25°</td></tr>
-<tr><td>货物掉落 / 超板</td><td>未记录</td><td>未记录</td><td>未记录</td></tr>
-</tbody></table></div>
-<p>下面保留 r177 与 r180 的直观对照，单独看<strong>同一个第 9 箱</strong>：把各自起点对齐，比较结束时相对载板移动了多少。它在 r177 中移动 6.6 毫米，在 r180 中移动 51.9 毫米。这个“同一箱终态”与上表的“全箱全过程最大值”不是一个口径。</p>
-<a href="35ee70164c_same_box_focus.png" target="_blank"><img src="35ee70164c_same_box_focus.png" alt="同一第9箱的同尺度比较：r177结束滑移6.6毫米，r180结束滑移51.9毫米"></a>
-<p class="muted">虚线是 17 秒时的起始位置，实色是各自结束位置。箱角按归档坐标重建，已经排除相机和板车整体移动；不是靠视频像素估算毫米数。点击图片可单独打开。</p>
-<p>“到了终点”不等于安全通过。r180 的板车角点还曾越出高平台边界约 20.5 厘米，外侧有较低地面，不能说成悬空了 20.5 厘米。这两次也不是多次统计试验，不能据此给出成功率。</p>
-<details><summary>展开比较口径、边界问题和原始指标</summary><div class="detail-body"><h3>比较口径</h3><p>两次保持相同场景、10 kg 居中载荷、自由堆叠、摩擦和相机扫描配置；r180 改变了动作选择、偏移刷新、空间偏好与部分指令检查。因此整体结果可以比较，但不能把差异全部归因于一个物理代价项。</p>
-<table class="data-table dense"><thead><tr><th>记录项</th><th>r177</th><th>r180</th></tr></thead><tbody>
-<tr><td>总仿真时间</td><td>223.708 s</td><td>303.700 s</td></tr><tr><td>从 17 s 起算的运输时段</td><td>206.708 s</td><td>286.700 s</td></tr><tr><td>全箱最大水平滑移</td><td>15.042 mm</td><td>51.885 mm</td></tr><tr><td>货物最大相对倾角</td><td>1.673°</td><td>4.205°</td></tr><tr><td>底盘累计后退路程估计</td><td>1.111 m</td><td>2.833 m</td></tr><tr><td>掉货 / 货物超板</td><td>未记录</td><td>未记录</td></tr><tr><td>持续脱手 / 机构报警</td><td>未记录</td><td>未记录</td></tr></tbody></table>
-<h3>不应遗漏的边界问题</h3><p>r180 的板车角点曾越出高平台边界约 205.3 mm。外侧存在较低地面，不能说成“悬空 20.5 cm”。r177 旧边界评估没有记录越界，但 matched_pose_count=0，不能拿它作已充分验证的零边界风险证据。</p>
-<p>r180 结束时板车平面速度仍约 0.0112 m/s；任务记录完成不代表所有部件完全静止。两次单独运行也不能给出具有统计意义的“成功率”。</p><div class="source-note"><b>对应归档依据：</b><br>r177 归档指标<br>r180 归档指标<br>滑移与后退统一比较</div></div></details><details><summary>展开滑移的定义、完整对照图和视频截图</summary><div class="detail-body"><h3>图像怎么得到</h3><p>该图由归档世界坐标和板车坐标中的姿态记录重建，按相同真实尺度绘制箱角，不是把视频画面变形后比较。虚线为 17 秒运输开始时，实色为各自全程结束时；上面的图聚焦同一第 9 箱，以其初始中心为原点。下方完整对照展示顶层四箱与载板边界。</p>
-<img src="92fddefa0e_slip_comparison.png" alt="完整顶层四箱与载板的同尺度对照" style="max-width:100%;cursor:default">
-<h3>滑移定义</h3><div class="equation"><div class="mathline">Δp<sub>j,xy</sub><sup>C</sup>(t) = p<sub>j,xy</sub><sup>C</sup>(t) − p<sub>j,xy</sub><sup>C</sup>(t<sub>0</sub>)</div><div class="mathline">s<sub>j</sub>(t) = ‖Δp<sub>j,xy</sub><sup>C</sup>(t)‖</div><div class="eq-note">货物相对板车的水平净位移，不是把每一步滑动距离累加。</div></div>
-<p>同一第 9 箱：r177 终态 6.618 mm，r180 终态 51.885 mm。全箱最大值：r177 第 8 箱在 217.808 s 达到 15.042 mm；r180 第 9 箱在结束时达到 51.885 mm。不能把全箱峰值当成同一箱同一时刻比较。</p>
-<img src="4686e7d5cb_end_video_comparison.png" alt="两次原视频终点的同区域同倍率比较，不能据图像像素直接测量毫米" style="max-width:100%;cursor:default">
-<p>视频终点截图只用于直观观察；板车姿态略有差异，毫米量以板车坐标重建结果为准。完整视频通过相对路径引用，网页连同项目目录使用即可；单独复制展示文件夹不会带上大视频。</p><div class="source-note"><b>对应归档依据：</b><br>坐标重建核查<br>同箱终态与全箱峰值数据</div></div></details>
-<h3>r177 原速完整视频</h3>
-<video controls preload="none" src="43307b6cd5_turn.mp4"></video>
-<h3>r180 原速完整视频</h3>
-<video controls preload="none" src="5f7664d842_turn.mp4"></video>
-
-<h3>r198：已走完整条路线，货物仍有明显滑移</h3>
-<p><strong>从原任务起点出发，通过 A 坡、平台转弯和 B 坡，到终点区域停车。</strong>原始记录 <code>passed_full_route=true</code>，停止原因为 <code>model_full_route_complete</code>，最终仿真时间 288.54 秒。这不是局部试验，也不是人为中止后宣称完成。</p>
-<p>本轮最大货物滑移 <strong>64.07 毫米</strong>、相对倾角 <strong>5.25°</strong>；没有记录掉货、超板、持续脱手或机构报警。<strong>任务跑通了，但运输稳定性没有优于 r177。</strong></p>
-<details><summary>展开 r198 的全程证据与尚未通过的检查</summary><div class="detail-body">
-<p>板车、底盘中心分别约在 169.44 s、186.32 s 进入 B 坡入口的平面范围；视频概览和实测轨迹确认之后通过 B 坡并在终点区域停车。中心进入范围本身不是轮载或接触力验证。</p>
-<p>1231 次决策被接受，其中 1141 次为运动参考。底盘累计行驶约 12.15 m，倒行累计约 1.47 m，仍有调整；不把每次后退都称异常。该倒行量来自本轮 transport_audit 的轨迹积分，与原 r177/r180 页面旧估计有口径细节差异，不用于精确差值排名。</p>
-<p>双臂实测跟踪误差峰约 0.0300 rad（约 1.72°）；位置命令对齐差约 1.19×10⁻⁷ rad，但速度前馈核对差仍有 5.72×10⁻⁵ rad/s，原 <code>alignment_passed=false</code>。它是接口核对未过，不等于发生了机构报警；也不能靠改容差把它写成通过。</p>
-<p>本轮归档 3297 个文件已有 SHA 核验；完整视频与原速片段已解码，并人工查看概览、关键帧和轨迹，非逐帧人工观看。完成运输不等于安全通过，更不是多场景成功率结论。</p>
-<div class="source-note">原始结束记录 · 实际评价 · 全程与倒行核对 · 视频复核范围</div>
-</div></details>
-<h3>r198 原速推车视频 · 4 分 08 秒</h3>
-<p class="muted">本次全程运行的模型阶段原速片段，包含运输和终点停车；初始化未放入片段。<a href="a6a51d8467_turn.mp4">查看含准备过程的完整原视频</a></p>
-<video controls preload="none" src="1eced73f59_model_motion.mp4"></video>
-</section>
-
-<section id="problems">
-<h2>不足到底会造成什么问题</h2>
-<h3>r177：能推有货的车，但不会根据货物受力选推法</h3>
-<p><strong>它会做的：</strong>看路、找路、弯道减速，让底盘和双手配合推车。<strong>它没做的：</strong>因为“箱子更重了、重心偏左了”，先计算受力再改变速度和转向。</p>
-<p>所以，这次能走完证明了当前场景的执行链路能工作；没有证明换成偏载或更急的坡折后仍能平稳运输。这是它适合做工程对照、却还不是载荷安全模型的原因。</p>
-
-<h3>r180：想走得快，却没配好“转得过来”</h3>
-<p>比如半径约 0.5 米的弯，选 8 厘米/秒前进，就需要约 0.16 弧度/秒的转速。旧程序候选里却最多只给到 0.09。按这组目标持续运动，弯就会转大，偏了再修，容易反复调整。</p>
-<p><strong>这是软件设置和动作选择不配套，不是已经测出机器人只能转到 0.09。</strong>r177 会先因弯道变急而降低参考速度；r180 换成评分选动作时，没有等价保留这种配合。同时，它主要看前方一个近目标和未来 1.5 秒，缺少对整段连续推进、反复倒车的充分约束。</p>
-<details><summary>展开转弯公式与“是不是物理权重导致”的核对</summary><div class="detail-body">
-<div class="equation"><div class="mathline">κ = 1/R,　ω = vκ = v/R</div><div class="mathline">v=0.08 m/s,　R=0.5 m　⇒　|ω|=0.16 rad/s</div><div class="mathline">v=0.08 m/s,　|ω|=0.09 rad/s　⇒　R≈0.89 m</div><div class="eq-note">这是稳态跟随曲线的几何关系；瞬时纠偏不必每刻严格满足它。</div></div>
-<p>57 s 附近确有这类选择，且当时实际下发还受原角加速度约束影响，不能把候选目标直接当成实测转速。在 1287 次决策重建里有 328 次此类稳态曲率失配；对这些相同观测去掉物理项后，293 次仍选同一动作，324 次仍失配。</p>
-<p>因此不能只说“物理权重太大”。候选集合、目标位置、时间窗口和转向约束也有问题。这只是同一批观测的重新评分，不是独立全程消融试验。本页保留原 r180 结果，不把后续取消上限试验混进来。</p>
-<p>决策重建依据</p>
-</div></details>
-
-<h3>r180：轮子“多硬、多能消振”是先估的，预测还没校准</h3>
-<p><strong>刚度</strong>可以理解为轮子与地面被压一点后，会增加多少支撑力；<strong>阻尼</strong>表示运动时有多少抑制振动的作用。模型用它们把“轮子碰到一个坡折”换算成“车身会怎样起伏和倾斜”。目前这些数是工程初值，没有用对应测量把它们校准。</p>
-<p>因此，同一块坡折，模型可能算得太颠，也可能算得太平。它若比较错了两种推法，选择就可能错。<strong>评分权重又是另一件事：</strong>它决定“更快接近目标”和“预计更平顺”各占多大分量，不会把不准的物理预测变准。目前也没有证据把所有退化都归因于这几个参数。</p>
-
-<h3>r180：算的是整车晃动，不是箱子滑动</h3>
-<p>预测器把货物和板车当作一起运动的整体。实际仿真里箱子能滑，模型里却没有“某箱已向外滑了几毫米”这个状态，也不会随箱子移动重新估计重心。<strong>所以整体晃动评分较低，并不保证箱子不散。</strong></p>
-<p>它还会记录摩擦需求和某个轮子是否快要失去支撑，但这两项没有直接进入本轮的动作评分或拒绝条件。也就是说，<strong>把风险数值记进日志，不等于它会因此减速或停车。</strong>不能把这些诊断量当作已经生效的安全控制。</p>
-
-<h3>r198：已经跑通，但它优化的还不是货物平稳</h3>
-<p>它主要关心路径跟踪、双臂配合、避障与能否停车。<strong>目标里没有“这一箱会滑多少”或“这个轮子撞上坡折会有多大冲击”。</strong>所以它可以完成路线，同时出现 64.1 毫米的货物滑移。这是目前的明确缺口，不能用“没掉货”掩盖。</p>
-<h3>r198：把整组当作一起转动，仍然省略了实际受力</h3>
-<p>一次预测内保持板车与底盘当前的平面相对角，双臂与升降配合地形。这让规划可执行，但没有完整求出脚轮怎么转、轮地能传多大力、两只手各承受多少力。<strong>位置关系算得通，不等于对运动误差和货物颠簸都预测准确。</strong></p>
-<p>它会根据自己刚才的预测误差多留一些障碍距离，但“过去最多偏了这么多”不保证下一步不会偏得更多。双臂速度前馈的接口核对也仍有残差，未全部通过。</p>
-<p>这一版没有 GOB，但已经跑完全程。因此不能把“没接 GOB”当成所有适配失败的统一原因；同样，也不能据这次跑通证明 GOB 没有价值。需要在保持其他条件一致时单独验证。</p>
-<h3>共同的边界：不预知路线，还不等于已经会泛化</h3>
-<p>三个版本都用观测地图找路，这是适配新场景的基础；但真实相机误差、多种坡折、通道宽度与偏载还没有成组验证。模型公式里有这些变量，只说明“可以描述”，不说明“换个场景也已经验证有效”。</p>
-<details><summary>相机扫描是不是倒车和滑移的主因？已有证据到哪一步</summary><div class="detail-body">
-<p>r177 与 r180 的扫描代码相同，但行走轨迹不同，实际视野仍会不同；相同扫描配置本身不能证明扫描完全无影响。</p>
-<p>后续已有 r181 固定运输视角的独立运行：保留起始扫描，运输阶段不再来回转头。它仍出现后退和滑移，并因支撑查询未知而未完成。其终点支撑查询与导航栅格的已知性还存在接口差异，因此不能把停止全部归因于固定相机。</p>
-<p>这否定了“关掉扫描就一定解决”的简单说法；也没有证明扫描始终必要。r181 未完成，不能和 r180 的全程滑移直接排名。它只作为此处的补充证据，不是本页第四个主要模型。</p>
-<p>固定视角检查 · 停车时两套支撑查询的核对</p>
-</div></details>
-</section>
-
-<section id="status">
-<h2>这三次尝试，离目标各差哪一步</h2>
-<p><strong>r177 说明：</strong>当前机器人、感知接口和执行逻辑可以在本场景把车推完；缺少根据载荷受力来调整推法。</p>
-<p><strong>r180 说明：</strong>质量、重心和四轮地形输入已经能进入物理预测，并真正改变动作选择；但目前没有带来改善，预测与路径跟踪的配合都还不可靠。</p>
-<p><strong>r198 说明：</strong>在线整组路径与底盘、双臂、升降联合规划已经接通，并在本场景跑完全程；但载荷动态预测尚未合入，货物滑移也没有优于 r177。</p>
-<p>我们最终要的是：看见轮子将经过的地形，结合货物重量分布，提前比较不同动作的后果，再输出能实际执行的推车动作。<strong>三个版本分别做到了其中一些部分，目前还没有一个版本把它们连成可靠、经多场景验证的完整模型。</strong></p>
-<details><summary>展开“参与决策”和“预测准确”分别验证了多少</summary><div class="detail-body"><h3>局部预测核对的范围</h3><p>筛选 274 个目标动作保持不变的 1.5 秒窗口；将模型终态与 0.2 秒采样并插值的编码器运动学估计对比。RMSE：高度 8.109 mm、侧倾 0.216°、俯仰 0.520°。窗口互相重叠，不能当成 274 次独立试验。</p>
-<p>这类终态误差不代表瞬间冲击峰值准确，也没有证明接触力、摩擦需求或货物滑移预测准确。模型没有根据这些窗口重新拟合参数；原评估中 prediction_accuracy_validated 仍为 false。</p>
-<h3>计算性能也需区分时间基准</h3><p>r180 单次选动作墙钟计算时间均值约 0.249 s，95 分位约 0.263 s，未含独立地图规划开销。0.2 s 是设定的仿真更新间隔；仿真可以慢于真实时间推进，不能据此宣称已满足实机实时控制周期。</p>
-</div></details>
-</section>
-
-<section id="sources">
-<h2>相关记录</h2>
-<p>r177 原始报告 · r180 原始报告 · r198 全程适配报告 · 原有演示资料</p>
-<details><summary>查看代码、评估记录和符号说明</summary><div class="detail-body">
-<p>r177 控制器 · r177 执行代码 · r180 在线预测器 · r180 动作选择</p>
-<p>r198 整组在线路径 · r198 联合优化 · r198 双臂与把手关系 · r198 运动检查</p>
-<p>r177 评估 · r180 评估 · r198 评估 · 本地证据与文件校验清单</p>
-<div class="table-wrap"><table><thead><tr><th>符号</th><th>含义</th></tr></thead><tbody>
-<tr><td>v、ω、κ</td><td>线速度、转向角速度、路径曲率</td></tr>
-<tr><td>r180：z、φ、θ</td><td>等效支撑高度、左右侧倾、前后俯仰</td></tr>
-<tr><td>m、c、I</td><td>总质量、重心、转动惯量</td></tr>
-<tr><td>hᵢ、Nᵢ、kᵢ、dᵢ</td><td>各轮地形高度、支撑力、等效刚度、阻尼</td></tr>
-<tr><td>r198：θ_C、θ_0、φ</td><td>板车朝向、底盘朝向、虚拟连接线朝向，都是平面转角</td></tr>
-<tr><td>r198：θ_1、θ_2</td><td>底盘与连接线、连接线与板车之间的相对转角</td></tr>
-<tr><td>r198：q、l、X/U/Q/L</td><td>双臂关节位置、升降高度，以及整段状态/动作/关节/升降序列</td></tr>
-</tbody></table></div>
-<p>不同模型在各自折叠区中定义符号，例如 r180 的 ℓ 是推力与重心的高度差，r198 的 ℓ 是虚拟连接线长度，不能混用。主要方程、假设、代价和约束均已列出；完整搜索、地图清理与数值实现仍以归档代码为准。</p>
-<p>这里核对的是本地已归档版本，不推定它们与 Ubuntu 当前代码同步；r189 的旧局部展示保留在检查记录/20261108_r189历史版中，不作为当前第三个版本。</p>
-</div></details>
-</section>
-<p class="muted">交接说明与后续修改约定</p>
-<section style="max-width:1200px;margin:24px auto;padding:20px"><p>公开展示版：保留三版本比较、两篇论文、图片和原速视频；源码及原始数据下载不在此次发布范围。页面文字中的来源说明仅供理解实验依据。完成路线不等于安全通过。</p></section></body></html>
+</main>
+<footer><p>meeting2 · r177 与 Keep 整车运输 · 更新于 2026.11.20</p><p><a href="#top">回到顶部</a> · <a href="https://github.com/3044183877ug-debug/Embodied-AI-Safety">项目仓库</a></p></footer></body>
+</html>
